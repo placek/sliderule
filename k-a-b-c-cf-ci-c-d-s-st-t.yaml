@@ -1,0 +1,236 @@
+# ============================================================
+#  Slide Rule Configuration
+# ============================================================
+#
+#  This file fully describes a circular (and optionally linear)
+#  slide rule:  which scales exist, how they're placed, their
+#  tick resolution, and where labels go.
+#
+#  Conventions
+#  -----------
+#  • direction:  "up"   = ticks grow outward (circular) / upward (linear)
+#                "down" = ticks grow inward  (circular) / downward (linear)
+#  • inverted:   true  → the scale reads right-to-left (CI, DI, …)
+#  • Tick tuples: [step, height_mm]
+#      height 8.0 = major  (gets a numeric label)
+#      height 7.0 = half-decade
+#      height 6.0 = medium
+#      height 5.0 = sub-medium
+#      height 4.0 = minor
+#      height 3.0 = finest
+#  • Sections split the domain into zones of differing density
+#    (coarser where the log mapping is compressed).
+# ============================================================
+
+
+# ----------------------------------------------------------
+#  Global geometry
+# ----------------------------------------------------------
+global:
+  rule_length_mm: 250.0          # linear rule length
+  center: [0.0, 0.0]            # circular layout center
+
+  # Radial spacing
+  gap_mm:  20.0                  # space between independent scale circles
+  pair_mm:  1.0                  # offset between mated-pair baselines
+                                 # (A/B, C/D share a visual edge)
+
+  # DXF layers (and their colours)
+  layers:
+    SLIDE:
+      color: 5                   # blue  — movable tongue
+    STATOR:
+      color: 3                   # green — fixed body
+
+
+# ----------------------------------------------------------
+#  Radii — defines the radial order outer → inner
+#  "base" is the conceptual shared radius; paired scales
+#  offset by ±pair_mm from it.
+# ----------------------------------------------------------
+radii:
+  R_K:    230.0
+  R_AB:   210.0          # shared baseline for A/B pair
+  R_CF:   190.0
+  R_CI:   170.0
+  R_CD:   150.0          # shared baseline for C/D pair
+  R_S:    130.0
+  R_ST:   110.0
+  R_T:     90.0
+  R_L:     70.0
+
+
+# ----------------------------------------------------------
+#  Scale definitions
+# ----------------------------------------------------------
+#
+#  Each key is the scale class (matches ScaleC, ScaleA, etc.).
+#  `transform` is the symbolic mapping x → [0,1].
+#
+#  The tick heights encode the visual hierarchy AND control
+#  which ticks get numeric labels (height == label_height).
+# ----------------------------------------------------------
+scales:
+
+  # ---- C / D  (fundamental log decade 1–10) ----
+  C:
+    transform: "log10(x)"
+    label_height: 8.0               # ticks at this height get number labels
+    label_tilt: 0.0
+    name_label:
+      angle_deg: 83.0               # clockwise from 12-o'clock (circular)
+      linear_offset_x: -5.0         # mm left of baseline start (linear)
+    sections:
+      - { start: 1.0,  end: 2.0,  ticks: [[1.0,8.0],[0.5,7.0],[0.1,6.0],[0.05,5.0],[0.01,4.0],[0.005,3.0]] }
+      - { start: 2.0,  end: 4.0,  ticks: [[1.0,8.0],[0.5,7.0],[0.1,6.0],[0.05,5.0],[0.01,4.0]] }
+      - { start: 4.0,  end: 6.0,  ticks: [[1.0,8.0],[0.5,7.0],[0.1,6.0],[0.05,5.0],[0.02,4.0]] }
+      - { start: 6.0,  end: 10.0, ticks: [[1.0,8.0],[0.5,7.0],[0.1,6.0],[0.05,5.0],[0.02,4.0]] }
+
+  D:
+    inherits: C                      # identical sections & transform
+
+  # ---- A / B  (two-decade log, 1–100) ----
+  A:
+    transform: "0.5 * log10(x)"
+    label_height: 8.0
+    label_tilt: 0.0
+    name_label:
+      angle_deg: 83.0
+      linear_offset_x: -5.0
+    sections:
+      - { start: 1.0,   end: 2.0,   ticks: [[1.0,8.0],[0.5,7.0],[0.1,6.0],[0.05,5.0],[0.01,4.0]] }
+      - { start: 2.0,   end: 5.0,   ticks: [[1.0,8.0],[0.5,7.0],[0.1,6.0],[0.05,5.0],[0.02,4.0]] }
+      - { start: 5.0,   end: 10.0,  ticks: [[1.0,8.0],[0.5,7.0],[0.1,6.0],[0.05,5.0]] }
+      - { start: 10.0,  end: 20.0,  ticks: [[10.0,8.0],[5.0,7.0],[1.0,6.0],[0.5,5.0],[0.1,4.0]] }
+      - { start: 20.0,  end: 50.0,  ticks: [[10.0,8.0],[5.0,7.0],[1.0,6.0],[0.5,5.0],[0.2,4.0]] }
+      - { start: 50.0,  end: 100.0, ticks: [[10.0,8.0],[5.0,7.0],[1.0,6.0],[0.5,5.0]] }
+
+  B:
+    inherits: A
+
+  # ---- K  (three-decade log, 1–1000) ----
+  K:
+    transform: "(1/3) * log10(x)"
+    label_height: 8.0
+    label_tilt: 0.0
+    name_label:
+      angle_deg: 83.0
+      linear_offset_x: -5.0
+    sections:
+      - { start: 1.0,    end: 2.0,    ticks: [[1.0,8.0],[0.5,7.0],[0.1,6.0],[0.05,5.0],[0.01,4.0]] }
+      - { start: 2.0,    end: 5.0,    ticks: [[1.0,8.0],[0.5,7.0],[0.1,6.0],[0.05,5.0],[0.02,4.0]] }
+      - { start: 5.0,    end: 10.0,   ticks: [[1.0,8.0],[0.5,7.0],[0.1,6.0],[0.05,5.0]] }
+      - { start: 10.0,   end: 20.0,   ticks: [[10.0,8.0],[5.0,7.0],[1.0,6.0],[0.5,5.0],[0.1,4.0]] }
+      - { start: 20.0,   end: 50.0,   ticks: [[10.0,8.0],[5.0,7.0],[1.0,6.0],[0.5,5.0],[0.2,4.0]] }
+      - { start: 50.0,   end: 100.0,  ticks: [[10.0,8.0],[5.0,7.0],[1.0,6.0],[0.5,5.0]] }
+      - { start: 100.0,  end: 200.0,  ticks: [[100.0,8.0],[50.0,7.0],[10.0,6.0],[5.0,5.0],[1.0,4.0]] }
+      - { start: 200.0,  end: 500.0,  ticks: [[100.0,8.0],[50.0,7.0],[10.0,6.0],[5.0,5.0],[2.0,4.0]] }
+      - { start: 500.0,  end: 1000.0, ticks: [[100.0,8.0],[50.0,7.0],[10.0,6.0],[5.0,5.0]] }
+
+  # ---- CF  (C folded at π) ----
+  CF:
+    transform: "(log10(x) - log10(pi)) % 1.0"
+    label_height: 8.0
+    label_tilt: 0.0
+    name_label:
+      angle_deg: 73.0
+      linear_offset_x: -5.0
+    sections:
+      # left segment:  π → 10
+      - { start: 3.14159, end: 4.0,       ticks: [[1.0,8.0],[0.5,7.0],[0.1,6.0],[0.05,5.0],[0.01,4.0]] }
+      - { start: 4.0,     end: 6.0,       ticks: [[1.0,8.0],[0.5,7.0],[0.1,6.0],[0.05,5.0],[0.02,4.0]] }
+      - { start: 6.0,     end: 10.0,      ticks: [[1.0,8.0],[0.5,7.0],[0.1,6.0],[0.05,5.0],[0.02,4.0]] }
+      # right segment: 1 → π  (wraps)
+      - { start: 1.0,     end: 2.0,       ticks: [[1.0,8.0],[0.5,7.0],[0.1,6.0],[0.05,5.0],[0.01,4.0],[0.005,3.0]] }
+      - { start: 2.0,     end: 3.14159,   ticks: [[1.0,8.0],[0.5,7.0],[0.1,6.0],[0.05,5.0],[0.01,4.0]] }
+
+  # ---- Trig scales ----
+  S:
+    transform: "log10(sin(rad(x))) + 1.0"
+    label_height: 8.0
+    label_tilt: 0.0
+    name_label:
+      angle_deg: 73.0
+      linear_offset_x: -5.0
+    sections:
+      - { start: 5.7,  end: 10.0, ticks: [[1.0,8.0],[0.5,6.0],[0.1,5.0],[0.05,4.0]] }
+      - { start: 10.0, end: 20.0, ticks: [[5.0,8.0],[1.0,6.0],[0.5,5.0],[0.1,4.0]] }
+      - { start: 20.0, end: 30.0, ticks: [[5.0,8.0],[1.0,6.0],[0.5,5.0],[0.2,4.0]] }
+      - { start: 30.0, end: 60.0, ticks: [[10.0,8.0],[5.0,6.0],[1.0,5.0],[0.5,4.0]] }
+      - { start: 60.0, end: 90.0, ticks: [[10.0,8.0],[5.0,6.0],[1.0,4.0]] }
+
+  T:
+    transform: "log10(tan(rad(x))) + 1.0"
+    label_height: 8.0
+    label_tilt: 0.0
+    name_label:
+      angle_deg: 73.0
+      linear_offset_x: -5.0
+    sections:
+      - { start: 5.7,  end: 10.0, ticks: [[1.0,8.0],[0.5,6.0],[0.1,5.0],[0.05,4.0]] }
+      - { start: 10.0, end: 20.0, ticks: [[5.0,8.0],[1.0,6.0],[0.5,5.0],[0.1,4.0]] }
+      - { start: 20.0, end: 30.0, ticks: [[5.0,8.0],[1.0,6.0],[0.5,5.0],[0.2,4.0]] }
+      - { start: 30.0, end: 45.0, ticks: [[5.0,8.0],[1.0,6.0],[0.5,5.0]] }
+
+  ST:
+    transform: "log10(sin(rad(x))) + 2.0"
+    label_height: 8.0
+    label_tilt: 0.0
+    name_label:
+      angle_deg: 73.0
+      linear_offset_x: -5.0
+    sections:
+      - { start: 0.5, end: 1.0, ticks: [[0.1,8.0],[0.05,6.0],[0.01,4.0]] }
+      - { start: 1.0, end: 2.0, ticks: [[0.5,8.0],[0.1,6.0],[0.05,5.0],[0.01,4.0]] }
+      - { start: 2.0, end: 4.0, ticks: [[1.0,8.0],[0.5,6.0],[0.1,5.0],[0.05,4.0]] }
+      - { start: 4.0, end: 6.0, ticks: [[1.0,8.0],[0.5,6.0],[0.1,5.0],[0.05,4.0]] }
+
+  # ---- L  (linear mantissa) ----
+  L:
+    transform: "x"
+    label_height: 8.0
+    label_tilt: 0.0
+    name_label:
+      angle_deg: 83.0
+      linear_offset_x: -5.0
+    sections:
+      - { start: 0.0, end: 0.5, ticks: [[0.1,8.0],[0.05,6.0],[0.01,5.0],[0.005,3.0]] }
+      - { start: 0.5, end: 1.0, ticks: [[0.1,8.0],[0.05,6.0],[0.01,5.0],[0.005,3.0]] }
+
+
+# ----------------------------------------------------------
+#  Layout — the draw list
+# ----------------------------------------------------------
+#
+#  Each entry says:
+#    scale     – which scale definition to use (key in `scales:`)
+#    part      – SLIDE or STATOR  (→ DXF layer)
+#    direction – tick growth direction
+#    inverted  – read backwards?
+#    radius    – explicit radius in mm  (circular mode)
+#    y_offset  – baseline position      (linear mode, optional)
+#
+#  Order = outer → inner (top → bottom for linear).
+#  For paired scales the comments show which shared baseline
+#  they straddle.
+# ----------------------------------------------------------
+layout:
+  - { scale: K,  part: STATOR, direction: up,   inverted: false, radius: 230.0  }
+
+  # A/B pair (shared baseline ≈ 210)
+  - { scale: A,  part: STATOR, direction: up,   inverted: false, radius: 211.0  }
+  - { scale: B,  part: SLIDE,  direction: down, inverted: false, radius: 209.0  }
+
+  # Slide mid-section
+  - { scale: CF, part: SLIDE,  direction: up,   inverted: false, radius: 190.0  }
+  - { scale: C,  part: SLIDE,  direction: up,   inverted: true,  radius: 170.0  }   # CI
+
+  # C/D pair (shared baseline ≈ 150)
+  - { scale: C,  part: SLIDE,  direction: up,   inverted: false, radius: 151.0  }
+  - { scale: D,  part: STATOR, direction: down, inverted: false, radius: 149.0  }
+
+  # Inner stator scales
+  - { scale: S,  part: STATOR, direction: down, inverted: false, radius: 130.0  }
+  - { scale: ST, part: STATOR, direction: down, inverted: false, radius: 110.0  }
+  - { scale: T,  part: STATOR, direction: down, inverted: false, radius:  90.0  }
+  - { scale: L,  part: STATOR, direction: down, inverted: false, radius:  70.0  }

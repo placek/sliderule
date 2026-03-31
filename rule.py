@@ -1,41 +1,107 @@
 #!/usr/bin/env nix-shell
-#!nix-shell -i python3 -p python3 python3Packages.ezdxf
+#!nix-shell -i python3 -p python3 python3Packages.ezdxf python3Packages.pyyaml
 
 import sys
-import ezdxf
 import math
+import yaml
+import ezdxf
 from ezdxf.enums import TextEntityAlignment
 
-RULE_LENGTH = 250.0
 
-# ==========================================
-# Layer names
-# ==========================================
-LAYER_SLIDE   = "SLIDE"    # B, CI, C, CF  — the sliding part
-LAYER_STATOR  = "STATOR"   # A, D, S, ST, T, K, L — fixed parts
+# ============================================================
+#  Transform expression compiler
+# ============================================================
+#
+#  Turns the human-readable strings in the YAML (e.g.
+#  "0.5 * log10(x)") into fast Python callables.
+# ============================================================
+
+_TRANSFORM_NAMESPACE = {
+    'math':   math,
+    'log10':  math.log10,
+    'sin':    math.sin,
+    'cos':    math.cos,
+    'tan':    math.tan,
+    'rad':    math.radians,
+    'pi':     math.pi,
+    'e':      math.e,
+    'sqrt':   math.sqrt,
+    'ln':     math.log,
+    'abs':    abs,
+}
+
+
+def compile_transform(expr: str):
+    """Compile a YAML transform string into a callable(x) -> float."""
+    code = compile(expr, f'<transform: {expr}>', 'eval')
+
+    def fn(x, _code=code, _ns=_TRANSFORM_NAMESPACE):
+        return eval(_code, _ns, {'x': x})
+
+    return fn
+
+
+# ============================================================
+#  YAML → scale object builder
+# ============================================================
+
+def _resolve_scale_def(name, scales_cfg):
+    """Follow `inherits` chains and return a fully-resolved scale dict."""
+    defn = scales_cfg[name]
+    if 'inherits' not in defn:
+        return defn
+    parent = _resolve_scale_def(defn['inherits'], scales_cfg)
+    merged = dict(parent)
+    # child keys override parent, except 'inherits' itself
+    for k, v in defn.items():
+        if k != 'inherits':
+            merged[k] = v
+    return merged
 
 
 class SlideRuleScale:
-    """Base class for all slide rule scales."""
-    def __init__(self, direction='up', inverted=False, layer=None):
-        self.sections = []
-        self.drawn_ticks = set()
+    """Generic slide-rule scale driven entirely by config data."""
+
+    def __init__(self, scale_name, scale_cfg, *,
+                 direction='up', inverted=False, layer=None,
+                 rule_length=250.0):
+        self.rule_length = rule_length
         self.direction = direction
         self.inverted = inverted
-        self.layer = layer  # DXF layer name
+        self.layer = layer
+        self.drawn_ticks = set()
 
-        self.label_tilt = 0.0  # extra rotation offset for tick number labels
-        self.name_angle_deg = 83.0  # angle for scale name label (clockwise from 12-o'clock)
-        self.name = self.__class__.__name__.replace("Scale", "")
+        # --- transform ---
+        self._transform_fn = compile_transform(scale_cfg['transform'])
+
+        # --- sections (convert [[step,h], …] lists → tuple pairs) ---
+        self.sections = []
+        for sec in scale_cfg['sections']:
+            self.sections.append({
+                'start': float(sec['start']),
+                'end':   float(sec['end']),
+                'ticks': [(float(t[0]), float(t[1])) for t in sec['ticks']],
+            })
+
+        # --- labelling ---
+        self.label_height = float(scale_cfg.get('label_height', 8.0))
+        self.label_tilt   = float(scale_cfg.get('label_tilt', 0.0))
+
+        name_label = scale_cfg.get('name_label', {})
+        self.name_angle_deg   = float(name_label.get('angle_deg', 83.0))
+        self.linear_offset_x  = float(name_label.get('linear_offset_x', -5.0))
+
+        # --- display name ---
+        self.name = scale_name
         if self.inverted and not self.name.endswith('I'):
-            self.name += "I"
+            self.name += 'I'
+
+    # ---------- transform ----------
 
     def transform(self, x):
-        raise NotImplementedError
+        return self._transform_fn(x)
 
-    # ------------------------------------------
-    # DXF attribute helper
-    # ------------------------------------------
+    # ---------- DXF helpers ----------
 
     def _dxfattribs(self, extra=None):
         a = {}
@@ -45,19 +111,12 @@ class SlideRuleScale:
             a.update(extra)
         return a
 
-    # ------------------------------------------
-    # Shared tick iteration (geometry-agnostic)
-    # ------------------------------------------
+    # ---------- tick iteration (shared) ----------
 
     def _iter_ticks(self):
-        """Yield (x_rounded, mapped_val, height) for every tick to draw.
-
-        Handles section iteration, de-duplication via drawn_ticks, inversion,
-        and bounds clamping — so callers only deal with positioning.
-        """
         for section in self.sections:
             start = section['start']
-            end = section['end']
+            end   = section['end']
             for step, height in section['ticks']:
                 num_ticks = int(round((end - start) / step))
                 for i in range(num_ticks + 1):
@@ -74,15 +133,13 @@ class SlideRuleScale:
                         yield x_rounded, mapped_val, height
 
     def _mark_drawn(self, x_rounded):
-        """Register a tick value so it won't be drawn again."""
         self.drawn_ticks.add(x_rounded)
 
-    # ------------------------------------------
-    # Linear drawing — public entry point
-    # ------------------------------------------
+    # ==========================================================
+    #  Linear drawing
+    # ==========================================================
 
     def draw(self, msp, y_offset=0.0):
-        """Draws the scale linearly."""
         y_mult = 1.0 if self.direction == 'up' else -1.0
         text_align = (TextEntityAlignment.BOTTOM_CENTER
                       if self.direction == 'up'
@@ -91,28 +148,24 @@ class SlideRuleScale:
         self._draw_linear_name(msp, y_offset, y_mult)
 
         for x_rounded, mapped_val, height in self._iter_ticks():
-            pos_x = mapped_val * RULE_LENGTH
+            pos_x = mapped_val * self.rule_length
             self._draw_linear_tick(msp, pos_x, y_offset, height, y_mult)
-            if height == 8.0:
+            if height == self.label_height:
                 self._draw_linear_label(msp, pos_x, y_offset, height,
                                         y_mult, text_align, x_rounded)
             self._mark_drawn(x_rounded)
 
         self._draw_linear_baseline(msp, y_offset)
 
-    # -- Linear sub-steps --
-
     def _draw_linear_name(self, msp, y_offset, y_mult):
-        """Render the scale name label to the left of the baseline."""
         msp.add_text(
             self.name, dxfattribs=self._dxfattribs({'height': 3.0})
         ).set_placement(
-            (-5.0, y_offset + (2.0 * y_mult)),
+            (self.linear_offset_x, y_offset + (2.0 * y_mult)),
             align=TextEntityAlignment.MIDDLE_RIGHT,
         )
 
     def _draw_linear_tick(self, msp, pos_x, y_offset, height, y_mult):
-        """Draw a single vertical tick mark."""
         msp.add_line(
             (pos_x, y_offset),
             (pos_x, y_offset + (height * y_mult)),
@@ -121,7 +174,6 @@ class SlideRuleScale:
 
     def _draw_linear_label(self, msp, pos_x, y_offset, height,
                            y_mult, text_align, x_rounded):
-        """Draw the numeric label above/below a major tick."""
         label_text = f"{x_rounded:g}"
         msp.add_text(
             label_text, dxfattribs=self._dxfattribs({'height': 2.5})
@@ -131,25 +183,22 @@ class SlideRuleScale:
         )
 
     def _draw_linear_baseline(self, msp, y_offset):
-        """Draw the horizontal baseline spanning the full rule length."""
         msp.add_line(
-            (0, y_offset), (RULE_LENGTH, y_offset),
+            (0, y_offset), (self.rule_length, y_offset),
             dxfattribs=self._dxfattribs(),
         )
 
-    # ------------------------------------------
-    # Circular drawing — public entry point
-    # ------------------------------------------
+    # ==========================================================
+    #  Circular drawing
+    # ==========================================================
 
     def draw_circular(self, msp, radius, center_x=0.0, center_y=0.0):
-        """Draws the scale radially around a center point."""
         y_mult = 1.0 if self.direction == 'up' else -1.0
 
         self._draw_circular_baseline(msp, radius, center_x, center_y)
         self._draw_circular_name(msp, radius, center_x, center_y, y_mult)
 
         for x_rounded, mapped_val, height in self._iter_ticks():
-            # Skip the wrap-around seam (mapped_val ≈ 1.0)
             if abs(mapped_val - 1.0) < 0.00001:
                 continue
 
@@ -157,67 +206,50 @@ class SlideRuleScale:
 
             self._draw_circular_tick(msp, radius, center_x, center_y,
                                      height, y_mult, angle_rad)
-            if height == 8.0:
+            if height == self.label_height:
                 self._draw_circular_label(msp, radius, center_x, center_y,
                                           height, y_mult, angle_deg,
                                           angle_rad, x_rounded)
             self._mark_drawn(x_rounded)
 
-    # -- Circular geometry helpers --
+    # -- circular geometry helpers --
 
     @staticmethod
     def _mapped_val_to_angle(mapped_val):
-        """Convert a normalised [0,1] value to clockwise angle from 12-o'clock.
-
-        Returns (angle_deg, angle_rad) in mathematical convention
-        (0° = east, CCW positive), with 0-on-the-scale at 90° (north).
-        """
         angle_deg = 90.0 - (mapped_val * 360.0)
         angle_rad = math.radians(angle_deg)
         return angle_deg, angle_rad
 
     @staticmethod
     def _point_on_circle(center_x, center_y, r, angle_rad):
-        """Return (x, y) on a circle of radius *r* at *angle_rad*."""
         return (center_x + r * math.cos(angle_rad),
                 center_y + r * math.sin(angle_rad))
 
-    # -- Circular sub-steps --
-
     def _draw_circular_baseline(self, msp, radius, center_x, center_y):
-        """Draw the base circle."""
         msp.add_circle(
             (center_x, center_y), radius,
             dxfattribs=self._dxfattribs(),
         )
 
     def _max_tick_height(self):
-        """Return the tallest tick height across all sections."""
         return max(h for sec in self.sections for _, h in sec['ticks'])
 
     def _draw_circular_name(self, msp, radius, center_x, center_y, y_mult):
-        """Render the scale name just clockwise of the 12-o'clock position.
-
-        The label is placed at mid-tick-height — halfway between the baseline
-        and the tallest tick tip — so it sits firmly within its own tick field
-        and cannot collide with a neighbouring scale's label.
-        """
-        name_angle_deg = self.name_angle_deg
-        name_angle_rad = math.radians(name_angle_deg)
-        # Place at the same radial distance as tick number labels (height + 1.5)
+        name_angle_rad = math.radians(self.name_angle_deg)
         name_radius = radius + ((self._max_tick_height() + 1.5) * y_mult)
-        text_rot = name_angle_deg - 90.0
+        text_rot = self.name_angle_deg - 90.0
 
         tx, ty = self._point_on_circle(center_x, center_y,
                                        name_radius, name_angle_rad)
         msp.add_text(
             self.name,
-            dxfattribs=self._dxfattribs({'height': 3.0, 'rotation': text_rot, 'color': 1}),
+            dxfattribs=self._dxfattribs({
+                'height': 3.0, 'rotation': text_rot, 'color': 1,
+            }),
         ).set_placement((tx, ty), align=TextEntityAlignment.MIDDLE_CENTER)
 
     def _draw_circular_tick(self, msp, radius, center_x, center_y,
                             height, y_mult, angle_rad):
-        """Draw a single radial tick mark."""
         x0, y0 = self._point_on_circle(center_x, center_y,
                                        radius, angle_rad)
         r1 = radius + (height * y_mult)
@@ -228,7 +260,6 @@ class SlideRuleScale:
     def _draw_circular_label(self, msp, radius, center_x, center_y,
                              height, y_mult, angle_deg, angle_rad,
                              x_rounded):
-        """Draw the numeric label at the end of a major radial tick."""
         label_text = f"{x_rounded:g}"
         text_radius = radius + ((height + 1.5) * y_mult)
         tx, ty = self._point_on_circle(center_x, center_y,
@@ -240,223 +271,83 @@ class SlideRuleScale:
         ).set_placement((tx, ty), align=TextEntityAlignment.MIDDLE_CENTER)
 
 
-# ==========================================
-# Scale definitions
-# ==========================================
+# ============================================================
+#  Main: load YAML → build scales → render DXF
+# ============================================================
 
-class ScaleC(SlideRuleScale):
-    """C scale: log, 1–10, full density."""
-    def __init__(self, direction='up', inverted=False, layer=None):
-        super().__init__(direction, inverted, layer)
-        self.sections = [
-            {'start': 1.0,  'end': 2.0,  'ticks': [(1.0, 8.0), (0.5, 7.0), (0.1, 6.0), (0.05, 5.0), (0.01, 4.0), (0.005, 3.0)]},
-            {'start': 2.0,  'end': 4.0,  'ticks': [(1.0, 8.0), (0.5, 7.0), (0.1, 6.0), (0.05, 5.0), (0.01, 4.0)]},
-            {'start': 4.0,  'end': 6.0,  'ticks': [(1.0, 8.0), (0.5, 7.0), (0.1, 6.0), (0.05, 5.0), (0.02, 4.0)]},
-            {'start': 6.0,  'end': 10.0, 'ticks': [(1.0, 8.0), (0.5, 7.0), (0.1, 6.0), (0.05, 5.0), (0.02, 4.0)]},
-        ]
-    def transform(self, x): return math.log10(x)
-
-class ScaleD(ScaleC):
-    """D scale: identical to C, on stator."""
-    pass
-
-class ScaleCF(SlideRuleScale):
-    """CF scale: C folded at π. Range 1–10 but mapped via log10(x/π)+log10(π)."""
-    def __init__(self, direction='up', inverted=False, layer=None):
-        super().__init__(direction, inverted, layer)
-        self.name_angle_deg = 73.0
-        self.name = "CF"
-        # Ticks cover 1–10 same density as C, but transform folds at π
-        self.sections = [
-            # π ≈ 3.14159  — left segment: π..10
-            {'start': math.pi,      'end': 4.0,  'ticks': [(1.0, 8.0), (0.5, 7.0), (0.1, 6.0), (0.05, 5.0), (0.01, 4.0)]},
-            {'start': 4.0,          'end': 6.0,  'ticks': [(1.0, 8.0), (0.5, 7.0), (0.1, 6.0), (0.05, 5.0), (0.02, 4.0)]},
-            {'start': 6.0,          'end': 10.0, 'ticks': [(1.0, 8.0), (0.5, 7.0), (0.1, 6.0), (0.05, 5.0), (0.02, 4.0)]},
-            # right segment: 1..π  (wraps around)
-            {'start': 1.0,          'end': 2.0,  'ticks': [(1.0, 8.0), (0.5, 7.0), (0.1, 6.0), (0.05, 5.0), (0.01, 4.0), (0.005, 3.0)]},
-            {'start': 2.0,          'end': math.pi, 'ticks': [(1.0, 8.0), (0.5, 7.0), (0.1, 6.0), (0.05, 5.0), (0.01, 4.0)]},
-        ]
-    def transform(self, x):
-        # Fold at π: shift log scale so π maps to 0
-        raw = math.log10(x) - math.log10(math.pi)
-        return raw % 1.0  # wrap to [0, 1)
-
-class ScaleA(SlideRuleScale):
-    """A scale: log, two decades 1–100."""
-    def __init__(self, direction='up', inverted=False, layer=None):
-        super().__init__(direction, inverted, layer)
-        self.sections = [
-            {'start': 1.0,   'end': 2.0,   'ticks': [(1.0, 8.0), (0.5, 7.0), (0.1, 6.0), (0.05, 5.0), (0.01, 4.0)]},
-            {'start': 2.0,   'end': 5.0,   'ticks': [(1.0, 8.0), (0.5, 7.0), (0.1, 6.0), (0.05, 5.0), (0.02, 4.0)]},
-            {'start': 5.0,   'end': 10.0,  'ticks': [(1.0, 8.0), (0.5, 7.0), (0.1, 6.0), (0.05, 5.0)]},
-            {'start': 10.0,  'end': 20.0,  'ticks': [(10.0, 8.0), (5.0, 7.0), (1.0, 6.0), (0.5, 5.0), (0.1, 4.0)]},
-            {'start': 20.0,  'end': 50.0,  'ticks': [(10.0, 8.0), (5.0, 7.0), (1.0, 6.0), (0.5, 5.0), (0.2, 4.0)]},
-            {'start': 50.0,  'end': 100.0, 'ticks': [(10.0, 8.0), (5.0, 7.0), (1.0, 6.0), (0.5, 5.0)]},
-        ]
-    def transform(self, x): return 0.5 * math.log10(x)
-
-class ScaleB(ScaleA):
-    """B scale: identical to A, on slide."""
-    pass
-
-class ScaleK(SlideRuleScale):
-    """K scale: three decades 1–1000."""
-    def __init__(self, direction='up', inverted=False, layer=None):
-        super().__init__(direction, inverted, layer)
-        self.sections = [
-            {'start': 1.0,    'end': 2.0,    'ticks': [(1.0, 8.0), (0.5, 7.0), (0.1, 6.0), (0.05, 5.0), (0.01, 4.0)]},
-            {'start': 2.0,    'end': 5.0,    'ticks': [(1.0, 8.0), (0.5, 7.0), (0.1, 6.0), (0.05, 5.0), (0.02, 4.0)]},
-            {'start': 5.0,    'end': 10.0,   'ticks': [(1.0, 8.0), (0.5, 7.0), (0.1, 6.0), (0.05, 5.0)]},
-            {'start': 10.0,   'end': 20.0,   'ticks': [(10.0, 8.0), (5.0, 7.0), (1.0, 6.0), (0.5, 5.0), (0.1, 4.0)]},
-            {'start': 20.0,   'end': 50.0,   'ticks': [(10.0, 8.0), (5.0, 7.0), (1.0, 6.0), (0.5, 5.0), (0.2, 4.0)]},
-            {'start': 50.0,   'end': 100.0,  'ticks': [(10.0, 8.0), (5.0, 7.0), (1.0, 6.0), (0.5, 5.0)]},
-            {'start': 100.0,  'end': 200.0,  'ticks': [(100.0, 8.0), (50.0, 7.0), (10.0, 6.0), (5.0, 5.0), (1.0, 4.0)]},
-            {'start': 200.0,  'end': 500.0,  'ticks': [(100.0, 8.0), (50.0, 7.0), (10.0, 6.0), (5.0, 5.0), (2.0, 4.0)]},
-            {'start': 500.0,  'end': 1000.0, 'ticks': [(100.0, 8.0), (50.0, 7.0), (10.0, 6.0), (5.0, 5.0)]},
-        ]
-    def transform(self, x): return (1.0 / 3.0) * math.log10(x)
-
-class ScaleS(SlideRuleScale):
-    """S scale: log-sin, 5.7°–90°."""
-    def __init__(self, direction='up', inverted=False, layer=None):
-        super().__init__(direction, inverted, layer)
-        self.name_angle_deg = 73.0
-        self.sections = [
-            {'start': 5.7,  'end': 10.0, 'ticks': [(1.0, 8.0), (0.5, 6.0), (0.1, 5.0), (0.05, 4.0)]},
-            {'start': 10.0, 'end': 20.0, 'ticks': [(5.0, 8.0), (1.0, 6.0), (0.5, 5.0), (0.1, 4.0)]},
-            {'start': 20.0, 'end': 30.0, 'ticks': [(5.0, 8.0), (1.0, 6.0), (0.5, 5.0), (0.2, 4.0)]},
-            {'start': 30.0, 'end': 60.0, 'ticks': [(10.0, 8.0), (5.0, 6.0), (1.0, 5.0), (0.5, 4.0)]},
-            {'start': 60.0, 'end': 90.0, 'ticks': [(10.0, 8.0), (5.0, 6.0), (1.0, 4.0)]},
-        ]
-    def transform(self, x): return math.log10(math.sin(math.radians(x))) + 1.0
-
-class ScaleT(SlideRuleScale):
-    """T scale: log-tan, 5.7°–45°."""
-    def __init__(self, direction='up', inverted=False, layer=None):
-        super().__init__(direction, inverted, layer)
-        self.name_angle_deg = 73.0
-        self.sections = [
-            {'start': 5.7,  'end': 10.0, 'ticks': [(1.0, 8.0), (0.5, 6.0), (0.1, 5.0), (0.05, 4.0)]},
-            {'start': 10.0, 'end': 20.0, 'ticks': [(5.0, 8.0), (1.0, 6.0), (0.5, 5.0), (0.1, 4.0)]},
-            {'start': 20.0, 'end': 30.0, 'ticks': [(5.0, 8.0), (1.0, 6.0), (0.5, 5.0), (0.2, 4.0)]},
-            {'start': 30.0, 'end': 45.0, 'ticks': [(5.0, 8.0), (1.0, 6.0), (0.5, 5.0)]},
-        ]
-    def transform(self, x): return math.log10(math.tan(math.radians(x))) + 1.0
-
-class ScaleST(SlideRuleScale):
-    """ST scale: log-sin/tan for small angles, 0.5°–6°."""
-    def __init__(self, direction='up', inverted=False, layer=None):
-        super().__init__(direction, inverted, layer)
-        self.name_angle_deg = 73.0
-        self.sections = [
-            {'start': 0.5, 'end': 1.0, 'ticks': [(0.1, 8.0), (0.05, 6.0), (0.01, 4.0)]},
-            {'start': 1.0, 'end': 2.0, 'ticks': [(0.5, 8.0), (0.1, 6.0), (0.05, 5.0), (0.01, 4.0)]},
-            {'start': 2.0, 'end': 4.0, 'ticks': [(1.0, 8.0), (0.5, 6.0), (0.1, 5.0), (0.05, 4.0)]},
-            {'start': 4.0, 'end': 6.0, 'ticks': [(1.0, 8.0), (0.5, 6.0), (0.1, 5.0), (0.05, 4.0)]},
-        ]
-    def transform(self, x): return math.log10(math.sin(math.radians(x))) + 2.0
-
-class ScaleL(SlideRuleScale):
-    """L scale: linear 0–1, gives mantissa of log10."""
-    def __init__(self, direction='up', inverted=False, layer=None):
-        super().__init__(direction, inverted, layer)
-        self.sections = [
-            {'start': 0.0,  'end': 0.5,  'ticks': [(0.1, 8.0), (0.05, 6.0), (0.01, 5.0), (0.005, 3.0)]},
-            {'start': 0.5,  'end': 1.0,  'ticks': [(0.1, 8.0), (0.05, 6.0), (0.01, 5.0), (0.005, 3.0)]},
-        ]
-    def transform(self, x): return x  # linear
+def load_config(path):
+    with open(path, 'r') as f:
+        return yaml.safe_load(f)
 
 
-# ==========================================
-# DXF Setup
-# ==========================================
-doc = ezdxf.new(dxfversion='R2010')
-msp = doc.modelspace()
+def build_and_render(cfg, output_file='output.dxf'):
+    g = cfg['global']
+    rule_length = g.get('rule_length_mm', 250.0)
+    center      = tuple(g.get('center', [0.0, 0.0]))
+    layers_cfg  = g.get('layers', {})
+    scales_cfg  = cfg['scales']
+    layout      = cfg['layout']
 
-# Create layers with distinct colors
-doc.layers.add(LAYER_SLIDE,  dxfattribs={'color': 5})   # blue  — slide: B, CI, C, CF
-doc.layers.add(LAYER_STATOR, dxfattribs={'color': 3})   # green — stator: A, D, S, ST, T, K, L
+    # --- DXF document ---
+    doc = ezdxf.new(dxfversion='R2010')
+    msp = doc.modelspace()
 
-# ==========================================
-# Circular layout — radius arrangement
-#
-# Paired scales share the SAME base circle; ticks point in opposite
-# directions so they read back-to-back, exactly like a real slide rule:
-#
-#   A (ticks outward / 'up')   ──┐  shared circle R_AB
-#   B (ticks inward  / 'down') ──┘
-#
-#   C (ticks outward / 'up')   ──┐  shared circle R_CD
-#   D (ticks inward  / 'down') ──┘
-#
-# Full layout outer → inner:
-#   K        (stator, ticks outward)
-#   A / B    (stator A outward, slide B inward)   ← paired
-#   CF       (slide, ticks outward)
-#   CI       (slide, ticks inward — inverted C)
-#   C / D    (slide C outward, stator D inward)   ← paired
-#   S        (stator, ticks inward)
-#   ST       (stator, ticks inward)
-#   T        (stator, ticks inward)
-#   L        (stator, ticks inward, innermost)
-#
-# GAP between independent circles = 20 mm  (tick field ≤ 12 mm + 8 mm margin)
-# Paired circles are separated by only 1 mm so they share a nearly-coincident
-# baseline — visually they appear as a single ruled edge.
-# ==========================================
+    for layer_name, layer_props in layers_cfg.items():
+        doc.layers.add(layer_name, dxfattribs={'color': layer_props.get('color', 7)})
 
-CENTER = (0.0, 0.0)
-GAP   = 20.0   # mm between independent scale circles
-PAIR  =  1.0   # mm offset between the two circles of a mated pair
-               # (non-zero so DXF viewers don't merge the lines)
+    # --- walk the layout ---
+    for entry in layout:
+        scale_key = entry['scale']
+        scale_def = _resolve_scale_def(scale_key, scales_cfg)
 
-R_K   = 230.0
-R_AB  = R_K  - GAP          # 210  — shared baseline for A (up) and B (down)
-R_CF  = R_AB - GAP          # 190
-R_CI  = R_CF - GAP          # 170
-R_CD  = R_CI - GAP          # 150  — shared baseline for C (up) and D (down)
-R_S   = R_CD - GAP          # 130
-R_ST  = R_S  - GAP          # 110
-R_T   = R_ST - GAP          # 90
-R_L   = R_T  - GAP          # 70
+        direction = entry.get('direction', 'up')
+        inverted  = entry.get('inverted', False)
+        layer     = entry.get('part', None)
+        radius    = entry.get('radius', None)
+        y_offset  = entry.get('y_offset', 0.0)
 
-# A sits just outside the shared circle (ticks go further outward)
-# B sits just inside it (ticks go inward)
-R_A   = R_AB + PAIR         # 211
-R_B   = R_AB - PAIR         # 209
+        scale_obj = SlideRuleScale(
+            scale_name=scale_key,
+            scale_cfg=scale_def,
+            direction=direction,
+            inverted=inverted,
+            layer=layer,
+            rule_length=rule_length,
+        )
 
-# C sits just outside the shared circle (ticks go outward)
-# D sits just inside it (ticks go inward)
-R_C   = R_CD + PAIR         # 151
-R_D   = R_CD - PAIR         # 149
+        if radius is not None:
+            scale_obj.draw_circular(msp, radius=radius,
+                                    center_x=center[0], center_y=center[1])
+        else:
+            scale_obj.draw(msp, y_offset=y_offset)
 
-# Each scale object paired with its explicit draw radius
-scale_draw_pairs = [
-    # (scale_object,                                          radius)
-    (ScaleK (direction='up',               layer=LAYER_STATOR), R_K),
-    # A/B pair — A outward (stator), B inward (slide)
-    (ScaleA (direction='up',               layer=LAYER_STATOR), R_A),
-    (ScaleB (direction='down',             layer=LAYER_SLIDE),  R_B),
-    # CF and CI on the slide
-    (ScaleCF(direction='up',               layer=LAYER_SLIDE),  R_CF),
-    (ScaleC (direction='up', inverted=True, layer=LAYER_SLIDE), R_CI),   # CI
-    # C/D pair — C outward (slide), D inward (stator)
-    (ScaleC (direction='up',               layer=LAYER_SLIDE),  R_C),
-    (ScaleD (direction='down',             layer=LAYER_STATOR), R_D),
-    # Inner stator trig / log scales
-    (ScaleS (direction='down',             layer=LAYER_STATOR), R_S),
-    (ScaleST(direction='down',             layer=LAYER_STATOR), R_ST),
-    (ScaleT (direction='down',             layer=LAYER_STATOR), R_T),
-    (ScaleL (direction='down',             layer=LAYER_STATOR), R_L),
-]
+    # --- save ---
+    doc.saveas(output_file)
 
-for scale_obj, r in scale_draw_pairs:
-    scale_obj.draw_circular(msp, radius=r, center_x=CENTER[0], center_y=CENTER[1])
+    # --- summary ---
+    print(f"Generated {output_file}")
+    print(f"Layers: {', '.join(layers_cfg.keys())}")
+    print(f"Scales drawn: {len(layout)}")
+    for entry in layout:
+        tag = entry['scale']
+        if entry.get('inverted'):
+            tag += 'I'
+        r = entry.get('radius')
+        part = entry.get('part', '?')
+        if r is not None:
+            print(f"  {tag:4s}  {part:7s}  R={r}")
+        else:
+            print(f"  {tag:4s}  {part:7s}  y={entry.get('y_offset', 0.0)}")
 
-output_file = sys.argv[1] if len(sys.argv) > 1 else "output.dxf"
-doc.saveas(output_file)
-print(f"Successfully generated {output_file}!")
-print(f"Layers: '{LAYER_SLIDE}' (blue)  |  '{LAYER_STATOR}' (green)")
-print("Paired baselines:  A/B share R≈210,  C/D share R≈150")
-print(f"All radii (mm): K={R_K}, A={R_A}, B={R_B}, CF={R_CF}, CI={R_CI}, "
-      f"C={R_C}, D={R_D}, S={R_S}, ST={R_ST}, T={R_T}, L={R_L}")
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description='Slide-rule DXF generator')
+    parser.add_argument('config', nargs='?', default='sliderule.yaml',
+                        help='YAML config file (default: sliderule.yaml)')
+    parser.add_argument('-o', '--output', default='output.dxf',
+                        help='Output DXF file (default: output.dxf)')
+    args = parser.parse_args()
+
+    cfg = load_config(args.config)
+    build_and_render(cfg, args.output)
