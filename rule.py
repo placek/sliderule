@@ -1,6 +1,7 @@
 #!/usr/bin/env nix-shell
 #!nix-shell -i python3 -p python3 python3Packages.ezdxf
 
+import sys
 import ezdxf
 import math
 from ezdxf.enums import TextEntityAlignment
@@ -12,6 +13,7 @@ RULE_LENGTH = 250.0
 # ==========================================
 LAYER_SLIDE   = "SLIDE"    # B, CI, C, CF  — the sliding part
 LAYER_STATOR  = "STATOR"   # A, D, S, ST, T, K, L — fixed parts
+
 
 class SlideRuleScale:
     """Base class for all slide rule scales."""
@@ -29,6 +31,10 @@ class SlideRuleScale:
     def transform(self, x):
         raise NotImplementedError
 
+    # ------------------------------------------
+    # DXF attribute helper
+    # ------------------------------------------
+
     def _dxfattribs(self, extra=None):
         a = {}
         if self.layer:
@@ -37,15 +43,16 @@ class SlideRuleScale:
             a.update(extra)
         return a
 
-    def draw(self, msp, y_offset=0.0):
-        """Draws the scale linearly."""
-        y_mult = 1.0 if self.direction == 'up' else -1.0
-        text_align = TextEntityAlignment.BOTTOM_CENTER if self.direction == 'up' else TextEntityAlignment.TOP_CENTER
+    # ------------------------------------------
+    # Shared tick iteration (geometry-agnostic)
+    # ------------------------------------------
 
-        msp.add_text(self.name, dxfattribs=self._dxfattribs({'height': 3.0})).set_placement(
-            (-5.0, y_offset + (2.0 * y_mult)),
-            align=TextEntityAlignment.MIDDLE_RIGHT
-        )
+    def _iter_ticks(self):
+        """Yield (x_rounded, mapped_val, height) for every tick to draw.
+
+        Handles section iteration, de-duplication via drawn_ticks, inversion,
+        and bounds clamping — so callers only deal with positioning.
+        """
         for section in self.sections:
             start = section['start']
             end = section['end']
@@ -56,87 +63,178 @@ class SlideRuleScale:
                     x_rounded = round(x, 5)
                     if x_rounded > end:
                         continue
-                    if x_rounded not in self.drawn_ticks:
-                        mapped_val = self.transform(x)
-                        if self.inverted:
-                            mapped_val = 1.0 - mapped_val
-                        if -0.00001 <= mapped_val <= 1.00001:
-                            pos_x = mapped_val * RULE_LENGTH
-                            msp.add_line((pos_x, y_offset), (pos_x, y_offset + (height * y_mult)),
-                                         dxfattribs=self._dxfattribs())
-                            if height == 8.0:
-                                label_text = f"{x_rounded:g}"
-                                msp.add_text(label_text, dxfattribs=self._dxfattribs({'height': 2.5})).set_placement(
-                                    (pos_x, y_offset + ((height + 0.5) * y_mult)),
-                                    align=text_align
-                                )
-                            self.drawn_ticks.add(x_rounded)
+                    if x_rounded in self.drawn_ticks:
+                        continue
+                    mapped_val = self.transform(x)
+                    if self.inverted:
+                        mapped_val = 1.0 - mapped_val
+                    if -0.00001 <= mapped_val <= 1.00001:
+                        yield x_rounded, mapped_val, height
 
-        msp.add_line((0, y_offset), (RULE_LENGTH, y_offset), dxfattribs=self._dxfattribs())
+    def _mark_drawn(self, x_rounded):
+        """Register a tick value so it won't be drawn again."""
+        self.drawn_ticks.add(x_rounded)
+
+    # ------------------------------------------
+    # Linear drawing — public entry point
+    # ------------------------------------------
+
+    def draw(self, msp, y_offset=0.0):
+        """Draws the scale linearly."""
+        y_mult = 1.0 if self.direction == 'up' else -1.0
+        text_align = (TextEntityAlignment.BOTTOM_CENTER
+                      if self.direction == 'up'
+                      else TextEntityAlignment.TOP_CENTER)
+
+        self._draw_linear_name(msp, y_offset, y_mult)
+
+        for x_rounded, mapped_val, height in self._iter_ticks():
+            pos_x = mapped_val * RULE_LENGTH
+            self._draw_linear_tick(msp, pos_x, y_offset, height, y_mult)
+            if height == 8.0:
+                self._draw_linear_label(msp, pos_x, y_offset, height,
+                                        y_mult, text_align, x_rounded)
+            self._mark_drawn(x_rounded)
+
+        self._draw_linear_baseline(msp, y_offset)
+
+    # -- Linear sub-steps --
+
+    def _draw_linear_name(self, msp, y_offset, y_mult):
+        """Render the scale name label to the left of the baseline."""
+        msp.add_text(
+            self.name, dxfattribs=self._dxfattribs({'height': 3.0})
+        ).set_placement(
+            (-5.0, y_offset + (2.0 * y_mult)),
+            align=TextEntityAlignment.MIDDLE_RIGHT,
+        )
+
+    def _draw_linear_tick(self, msp, pos_x, y_offset, height, y_mult):
+        """Draw a single vertical tick mark."""
+        msp.add_line(
+            (pos_x, y_offset),
+            (pos_x, y_offset + (height * y_mult)),
+            dxfattribs=self._dxfattribs(),
+        )
+
+    def _draw_linear_label(self, msp, pos_x, y_offset, height,
+                           y_mult, text_align, x_rounded):
+        """Draw the numeric label above/below a major tick."""
+        label_text = f"{x_rounded:g}"
+        msp.add_text(
+            label_text, dxfattribs=self._dxfattribs({'height': 2.5})
+        ).set_placement(
+            (pos_x, y_offset + ((height + 0.5) * y_mult)),
+            align=text_align,
+        )
+
+    def _draw_linear_baseline(self, msp, y_offset):
+        """Draw the horizontal baseline spanning the full rule length."""
+        msp.add_line(
+            (0, y_offset), (RULE_LENGTH, y_offset),
+            dxfattribs=self._dxfattribs(),
+        )
+
+    # ------------------------------------------
+    # Circular drawing — public entry point
+    # ------------------------------------------
 
     def draw_circular(self, msp, radius, center_x=0.0, center_y=0.0):
         """Draws the scale radially around a center point."""
         y_mult = 1.0 if self.direction == 'up' else -1.0
 
-        msp.add_circle((center_x, center_y), radius, dxfattribs=self._dxfattribs())
+        self._draw_circular_baseline(msp, radius, center_x, center_y)
+        self._draw_circular_name(msp, radius, center_x, center_y, y_mult)
 
-        # Label sits just clockwise of the scale start (mapped_val=0 -> 90 deg).
-        # 'Right of the start' means a few degrees clockwise, i.e. angle slightly < 90 deg.
-        name_angle_deg = 83.0          # 90 - 7 deg offset clockwise
-        name_angle_rad = math.radians(name_angle_deg)
-        name_radius    = radius + (12.0 * y_mult)
-        # Rotate text tangentially so it reads naturally along the arc.
-        text_rot = name_angle_deg - 90.0   # = -7 deg
-        msp.add_text(self.name, dxfattribs=self._dxfattribs({'height': 3.0, 'rotation': text_rot})).set_placement(
-            (center_x + name_radius * math.cos(name_angle_rad),
-             center_y + name_radius * math.sin(name_angle_rad)),
-            align=TextEntityAlignment.MIDDLE_CENTER
+        for x_rounded, mapped_val, height in self._iter_ticks():
+            # Skip the wrap-around seam (mapped_val ≈ 1.0)
+            if abs(mapped_val - 1.0) < 0.00001:
+                continue
+
+            angle_deg, angle_rad = self._mapped_val_to_angle(mapped_val)
+
+            self._draw_circular_tick(msp, radius, center_x, center_y,
+                                     height, y_mult, angle_rad)
+            if height == 8.0:
+                self._draw_circular_label(msp, radius, center_x, center_y,
+                                          height, y_mult, angle_deg,
+                                          angle_rad, x_rounded)
+            self._mark_drawn(x_rounded)
+
+    # -- Circular geometry helpers --
+
+    @staticmethod
+    def _mapped_val_to_angle(mapped_val):
+        """Convert a normalised [0,1] value to clockwise angle from 12-o'clock.
+
+        Returns (angle_deg, angle_rad) in mathematical convention
+        (0° = east, CCW positive), with 0-on-the-scale at 90° (north).
+        """
+        angle_deg = 90.0 - (mapped_val * 360.0)
+        angle_rad = math.radians(angle_deg)
+        return angle_deg, angle_rad
+
+    @staticmethod
+    def _point_on_circle(center_x, center_y, r, angle_rad):
+        """Return (x, y) on a circle of radius *r* at *angle_rad*."""
+        return (center_x + r * math.cos(angle_rad),
+                center_y + r * math.sin(angle_rad))
+
+    # -- Circular sub-steps --
+
+    def _draw_circular_baseline(self, msp, radius, center_x, center_y):
+        """Draw the base circle."""
+        msp.add_circle(
+            (center_x, center_y), radius,
+            dxfattribs=self._dxfattribs(),
         )
 
-        for section in self.sections:
-            start = section['start']
-            end = section['end']
-            for step, height in section['ticks']:
-                num_ticks = int(round((end - start) / step))
-                for i in range(num_ticks + 1):
-                    x = start + (i * step)
-                    x_rounded = round(x, 5)
+    def _max_tick_height(self):
+        """Return the tallest tick height across all sections."""
+        return max(h for sec in self.sections for _, h in sec['ticks'])
 
-                    if x_rounded > end:
-                        continue
-                    if x_rounded not in self.drawn_ticks:
-                        mapped_val = self.transform(x)
+    def _draw_circular_name(self, msp, radius, center_x, center_y, y_mult):
+        """Render the scale name just clockwise of the 12-o'clock position.
 
-                        if self.inverted:
-                            mapped_val = 1.0 - mapped_val
+        The label is placed at mid-tick-height — halfway between the baseline
+        and the tallest tick tip — so it sits firmly within its own tick field
+        and cannot collide with a neighbouring scale's label.
+        """
+        name_angle_deg = 83.0           # 90° - 7° offset clockwise
+        name_angle_rad = math.radians(name_angle_deg)
+        name_radius = radius + ((self._max_tick_height() / 2.0) * y_mult)
+        text_rot = name_angle_deg - 90.0
 
-                        if abs(mapped_val - 1.0) < 0.00001:
-                            continue
+        tx, ty = self._point_on_circle(center_x, center_y,
+                                       name_radius, name_angle_rad)
+        msp.add_text(
+            self.name,
+            dxfattribs=self._dxfattribs({'height': 3.0, 'rotation': text_rot}),
+        ).set_placement((tx, ty), align=TextEntityAlignment.MIDDLE_CENTER)
 
-                        if -0.00001 <= mapped_val <= 1.00001:
-                            angle_deg = 90.0 - (mapped_val * 360.0)
-                            angle_rad = math.radians(angle_deg)
+    def _draw_circular_tick(self, msp, radius, center_x, center_y,
+                            height, y_mult, angle_rad):
+        """Draw a single radial tick mark."""
+        x0, y0 = self._point_on_circle(center_x, center_y,
+                                       radius, angle_rad)
+        r1 = radius + (height * y_mult)
+        x1, y1 = self._point_on_circle(center_x, center_y,
+                                       r1, angle_rad)
+        msp.add_line((x0, y0), (x1, y1), dxfattribs=self._dxfattribs())
 
-                            x0 = center_x + radius * math.cos(angle_rad)
-                            y0 = center_y + radius * math.sin(angle_rad)
-
-                            r1 = radius + (height * y_mult)
-                            x1 = center_x + r1 * math.cos(angle_rad)
-                            y1 = center_y + r1 * math.sin(angle_rad)
-
-                            msp.add_line((x0, y0), (x1, y1), dxfattribs=self._dxfattribs())
-
-                            if height == 8.0:
-                                label_text = f"{x_rounded:g}"
-                                text_radius = radius + ((height + 1.5) * y_mult)
-                                tx = center_x + text_radius * math.cos(angle_rad)
-                                ty = center_y + text_radius * math.sin(angle_rad)
-                                text_rot = angle_deg - 90
-                                msp.add_text(label_text, dxfattribs=self._dxfattribs({'height': 2.5, 'rotation': text_rot})).set_placement(
-                                    (tx, ty), align=TextEntityAlignment.MIDDLE_CENTER
-                                )
-
-                            self.drawn_ticks.add(x_rounded)
+    def _draw_circular_label(self, msp, radius, center_x, center_y,
+                             height, y_mult, angle_deg, angle_rad,
+                             x_rounded):
+        """Draw the numeric label at the end of a major radial tick."""
+        label_text = f"{x_rounded:g}"
+        text_radius = radius + ((height + 1.5) * y_mult)
+        tx, ty = self._point_on_circle(center_x, center_y,
+                                       text_radius, angle_rad)
+        text_rot = angle_deg - 90
+        msp.add_text(
+            label_text,
+            dxfattribs=self._dxfattribs({'height': 2.5, 'rotation': text_rot}),
+        ).set_placement((tx, ty), align=TextEntityAlignment.MIDDLE_CENTER)
 
 
 # ==========================================
@@ -348,8 +446,9 @@ scale_draw_pairs = [
 for scale_obj, r in scale_draw_pairs:
     scale_obj.draw_circular(msp, radius=r, center_x=CENTER[0], center_y=CENTER[1])
 
-doc.saveas("requested_scales.dxf")
-print("Successfully generated requested_scales.dxf!")
+output_file = sys.argv[1] if len(sys.argv) > 1 else "output.dxf"
+doc.saveas(output_file)
+print(f"Successfully generated {output_file}!")
 print(f"Layers: '{LAYER_SLIDE}' (blue)  |  '{LAYER_STATOR}' (green)")
 print("Paired baselines:  A/B share R≈210,  C/D share R≈150")
 print(f"All radii (mm): K={R_K}, A={R_A}, B={R_B}, CF={R_CF}, CI={R_CI}, "
