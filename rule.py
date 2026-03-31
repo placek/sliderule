@@ -24,6 +24,8 @@ class SlideRuleScale:
         self.inverted = inverted
         self.layer = layer  # DXF layer name
 
+        self.label_tilt = 0.0  # extra rotation offset for tick number labels
+        self.name_angle_deg = 83.0  # angle for scale name label (clockwise from 12-o'clock)
         self.name = self.__class__.__name__.replace("Scale", "")
         if self.inverted and not self.name.endswith('I'):
             self.name += "I"
@@ -200,16 +202,17 @@ class SlideRuleScale:
         and the tallest tick tip — so it sits firmly within its own tick field
         and cannot collide with a neighbouring scale's label.
         """
-        name_angle_deg = 83.0           # 90° - 7° offset clockwise
+        name_angle_deg = self.name_angle_deg
         name_angle_rad = math.radians(name_angle_deg)
-        name_radius = radius + ((self._max_tick_height() / 2.0) * y_mult)
+        # Place at the same radial distance as tick number labels (height + 1.5)
+        name_radius = radius + ((self._max_tick_height() + 1.5) * y_mult)
         text_rot = name_angle_deg - 90.0
 
         tx, ty = self._point_on_circle(center_x, center_y,
                                        name_radius, name_angle_rad)
         msp.add_text(
             self.name,
-            dxfattribs=self._dxfattribs({'height': 3.0, 'rotation': text_rot}),
+            dxfattribs=self._dxfattribs({'height': 3.0, 'rotation': text_rot, 'color': 1}),
         ).set_placement((tx, ty), align=TextEntityAlignment.MIDDLE_CENTER)
 
     def _draw_circular_tick(self, msp, radius, center_x, center_y,
@@ -230,7 +233,7 @@ class SlideRuleScale:
         text_radius = radius + ((height + 1.5) * y_mult)
         tx, ty = self._point_on_circle(center_x, center_y,
                                        text_radius, angle_rad)
-        text_rot = angle_deg - 90
+        text_rot = angle_deg - 90 + self.label_tilt
         msp.add_text(
             label_text,
             dxfattribs=self._dxfattribs({'height': 2.5, 'rotation': text_rot}),
@@ -261,6 +264,7 @@ class ScaleCF(SlideRuleScale):
     """CF scale: C folded at π. Range 1–10 but mapped via log10(x/π)+log10(π)."""
     def __init__(self, direction='up', inverted=False, layer=None):
         super().__init__(direction, inverted, layer)
+        self.name_angle_deg = 73.0
         self.name = "CF"
         # Ticks cover 1–10 same density as C, but transform folds at π
         self.sections = [
@@ -316,6 +320,7 @@ class ScaleS(SlideRuleScale):
     """S scale: log-sin, 5.7°–90°."""
     def __init__(self, direction='up', inverted=False, layer=None):
         super().__init__(direction, inverted, layer)
+        self.name_angle_deg = 73.0
         self.sections = [
             {'start': 5.7,  'end': 10.0, 'ticks': [(1.0, 8.0), (0.5, 6.0), (0.1, 5.0), (0.05, 4.0)]},
             {'start': 10.0, 'end': 20.0, 'ticks': [(5.0, 8.0), (1.0, 6.0), (0.5, 5.0), (0.1, 4.0)]},
@@ -329,6 +334,7 @@ class ScaleT(SlideRuleScale):
     """T scale: log-tan, 5.7°–45°."""
     def __init__(self, direction='up', inverted=False, layer=None):
         super().__init__(direction, inverted, layer)
+        self.name_angle_deg = 73.0
         self.sections = [
             {'start': 5.7,  'end': 10.0, 'ticks': [(1.0, 8.0), (0.5, 6.0), (0.1, 5.0), (0.05, 4.0)]},
             {'start': 10.0, 'end': 20.0, 'ticks': [(5.0, 8.0), (1.0, 6.0), (0.5, 5.0), (0.1, 4.0)]},
@@ -341,6 +347,7 @@ class ScaleST(SlideRuleScale):
     """ST scale: log-sin/tan for small angles, 0.5°–6°."""
     def __init__(self, direction='up', inverted=False, layer=None):
         super().__init__(direction, inverted, layer)
+        self.name_angle_deg = 73.0
         self.sections = [
             {'start': 0.5, 'end': 1.0, 'ticks': [(0.1, 8.0), (0.05, 6.0), (0.01, 4.0)]},
             {'start': 1.0, 'end': 2.0, 'ticks': [(0.5, 8.0), (0.1, 6.0), (0.05, 5.0), (0.01, 4.0)]},
