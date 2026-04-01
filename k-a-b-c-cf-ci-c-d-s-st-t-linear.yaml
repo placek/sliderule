@@ -30,6 +30,7 @@ global:
 
   # Linear geometry
   rule_length_mm: 250.0            # total length of the rule
+  start_y: 0.0                     # topmost scale baseline y-position
 
   # DXF layers (and their colours)
   layers:
@@ -181,32 +182,35 @@ scales:
 # ----------------------------------------------------------
 #
 #  Each entry says:
-#    scale     – which scale definition to use (key in `scales:`)
-#    part      – SLIDE or STATOR  (→ DXF layer)
-#    direction – tick growth direction
-#    inverted  – read backwards?
-#    y_offset  – baseline position (linear mode)
+#    scale      – which scale definition to use (key in `scales:`)
+#    part       – SLIDE or STATOR  (→ DXF layer)
+#    direction  – tick growth direction
+#    inverted   – read backwards?
+#    gap_before – mm gap from previous scale's baseline to this one
+#                 (first entry: offset downward from start_y)
 #
-#  Order = top → bottom. For paired scales the comments show
-#  which shared baseline they straddle.
+#  Positions are computed by walking the list and accumulating
+#  gaps downward from start_y.
+#
+#  Order = top → bottom.
 # ----------------------------------------------------------
 layout:
-  - { scale: K,  part: STATOR, direction: up,   inverted: false, y_offset:   0.0 }
+  - { scale: K,  part: STATOR, direction: up,   inverted: false, gap_before:  0.0 }
 
-  # A/B pair (shared baseline ≈ -20)
-  - { scale: A,  part: STATOR, direction: up,   inverted: false, y_offset: -19.0 }
-  - { scale: B,  part: SLIDE,  direction: down, inverted: false, y_offset: -21.0 }
+  # A/B pair  — 2 mm apart, 19 mm below K
+  - { scale: A,  part: STATOR, direction: up,   inverted: false, gap_before: 19.0 }
+  - { scale: B,  part: SLIDE,  direction: down, inverted: false, gap_before:  2.0 }
 
   # Slide mid-section
-  - { scale: CF, part: SLIDE,  direction: up,   inverted: false, y_offset: -40.0 }
-  - { scale: C,  part: SLIDE,  direction: up,   inverted: true,  y_offset: -60.0 }   # CI
+  - { scale: CF, part: SLIDE,  direction: up,   inverted: false, gap_before: 19.0 }
+  - { scale: C,  part: SLIDE,  direction: up,   inverted: true,  gap_before: 20.0 }   # CI
 
-  # C/D pair (shared baseline ≈ -80)
-  - { scale: C,  part: SLIDE,  direction: up,   inverted: false, y_offset: -79.0 }
-  - { scale: D,  part: STATOR, direction: down, inverted: false, y_offset: -81.0 }
+  # C/D pair  — 2 mm apart, 19 mm below CI
+  - { scale: C,  part: SLIDE,  direction: up,   inverted: false, gap_before: 19.0 }
+  - { scale: D,  part: STATOR, direction: down, inverted: false, gap_before:  2.0 }
 
   # Inner stator scales
-  - { scale: S,  part: STATOR, direction: down, inverted: false, y_offset: -100.0 }
-  - { scale: ST, part: STATOR, direction: down, inverted: false, y_offset: -120.0 }
-  - { scale: T,  part: STATOR, direction: down, inverted: false, y_offset: -140.0 }
-  - { scale: L,  part: STATOR, direction: down, inverted: false, y_offset: -160.0 }
+  - { scale: S,  part: STATOR, direction: down, inverted: false, gap_before: 19.0 }
+  - { scale: ST, part: STATOR, direction: down, inverted: false, gap_before: 20.0 }
+  - { scale: T,  part: STATOR, direction: down, inverted: false, gap_before: 20.0 }
+  - { scale: L,  part: STATOR, direction: down, inverted: false, gap_before: 20.0 }

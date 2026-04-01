@@ -280,6 +280,28 @@ def load_config(path):
         return yaml.safe_load(f)
 
 
+def _compute_positions(layout, rule_type, g):
+    """Walk the layout list, accumulate gap_before values, return positions.
+
+    For circular: positions are radii, decreasing from start_radius.
+    For linear:   positions are y-offsets, decreasing from start_y.
+    """
+    if rule_type == 'circular':
+        pos = g.get('start_radius', 230.0)
+    else:
+        pos = g.get('start_y', 0.0)
+
+    positions = []
+    for i, entry in enumerate(layout):
+        gap = float(entry.get('gap_before', 0.0))
+        if i == 0:
+            pos -= gap          # first entry: offset from start
+        else:
+            pos -= gap          # subsequent entries: gap from previous
+        positions.append(pos)
+    return positions
+
+
 def build_and_render(cfg, output_file='output.dxf'):
     g = cfg['global']
     rule_type   = g.get('type', None)
@@ -299,6 +321,9 @@ def build_and_render(cfg, output_file='output.dxf'):
         center = tuple(g.get('center', [0.0, 0.0]))
         rule_length = 250.0          # not used for circular, but needed by SlideRuleScale
 
+    # Compute absolute positions from gaps
+    positions = _compute_positions(layout, rule_type, g)
+
     # --- DXF document ---
     doc = ezdxf.new(dxfversion='R2010')
     msp = doc.modelspace()
@@ -307,7 +332,7 @@ def build_and_render(cfg, output_file='output.dxf'):
         doc.layers.add(layer_name, dxfattribs={'color': layer_props.get('color', 7)})
 
     # --- walk the layout ---
-    for entry in layout:
+    for entry, pos in zip(layout, positions):
         scale_key = entry['scale']
         scale_def = _resolve_scale_def(scale_key, scales_cfg)
 
@@ -325,17 +350,10 @@ def build_and_render(cfg, output_file='output.dxf'):
         )
 
         if rule_type == 'circular':
-            radius = entry.get('radius')
-            if radius is None:
-                raise ValueError(
-                    f"Layout entry for '{scale_key}' is missing 'radius' "
-                    f"(required for circular rules)"
-                )
-            scale_obj.draw_circular(msp, radius=radius,
+            scale_obj.draw_circular(msp, radius=pos,
                                     center_x=center[0], center_y=center[1])
         else:
-            y_offset = entry.get('y_offset', 0.0)
-            scale_obj.draw(msp, y_offset=y_offset)
+            scale_obj.draw(msp, y_offset=pos)
 
     # --- save ---
     doc.saveas(output_file)
@@ -344,15 +362,15 @@ def build_and_render(cfg, output_file='output.dxf'):
     print(f"Generated {output_file}  ({rule_type})")
     print(f"Layers: {', '.join(layers_cfg.keys())}")
     print(f"Scales drawn: {len(layout)}")
-    for entry in layout:
+    for entry, pos in zip(layout, positions):
         tag = entry['scale']
         if entry.get('inverted'):
             tag += 'I'
         part = entry.get('part', '?')
         if rule_type == 'circular':
-            print(f"  {tag:4s}  {part:7s}  R={entry.get('radius')}")
+            print(f"  {tag:4s}  {part:7s}  R={pos:.1f}")
         else:
-            print(f"  {tag:4s}  {part:7s}  y={entry.get('y_offset', 0.0)}")
+            print(f"  {tag:4s}  {part:7s}  y={pos:.1f}")
 
 
 if __name__ == '__main__':
