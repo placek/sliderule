@@ -38,42 +38,6 @@ def compile_transform(expr: str):
 
 
 # ============================================================
-#  Inheritance resolver
-# ============================================================
-
-def _resolve_inherits(entry, all_scales):
-    """If `entry` has an `inherits` key, merge from the named source scale."""
-    parent_name = entry.get('inherits')
-    if parent_name is None:
-        return entry
-
-    # Find the parent scale by name across all parts
-    parent = None
-    for s in all_scales:
-        if s['name'] == parent_name:
-            parent = s
-            break
-    if parent is None:
-        raise ValueError(
-            f"Scale '{entry['name']}' inherits from '{parent_name}' "
-            f"which was not found"
-        )
-
-    # Recursively resolve if parent also inherits
-    parent = _resolve_inherits(parent, all_scales)
-
-    # Merge: parent fields as base, child overrides
-    merged = {}
-    for k, v in parent.items():
-        if k not in ('name', 'offset', 'direction', 'inverted', 'inherits'):
-            merged[k] = v
-    for k, v in entry.items():
-        if k != 'inherits':
-            merged[k] = v
-    return merged
-
-
-# ============================================================
 #  SlideRuleScale — draws one scale
 # ============================================================
 
@@ -355,15 +319,6 @@ def load_config(path):
         return yaml.safe_load(f)
 
 
-def _collect_all_scales(layout):
-    """Gather every scale entry from all parts into a flat list."""
-    all_scales = []
-    for part_name, entries in layout.items():
-        for entry in entries:
-            all_scales.append(entry)
-    return all_scales
-
-
 def build_and_render(cfg, output_file='output.dxf'):
     g = cfg['global']
     rule_type = g.get('type', None)
@@ -382,9 +337,6 @@ def build_and_render(cfg, output_file='output.dxf'):
         center = tuple(g.get('center', [0.0, 0.0]))
         rule_length = 250.0
 
-    # Collect all scales for inheritance resolution
-    all_scales = _collect_all_scales(layout)
-
     # --- DXF document ---
     doc = ezdxf.new(dxfversion='R2010')
     msp = doc.modelspace()
@@ -398,28 +350,25 @@ def build_and_render(cfg, output_file='output.dxf'):
     summary_lines = []
 
     for part_name, entries in layout.items():
-        layer = part_name.upper()          # stator → STATOR, slide → SLIDE
+        layer = part_name.upper()
 
         for entry in entries:
-            resolved = _resolve_inherits(entry, all_scales)
-            offset   = float(resolved['offset'])
+            offset = float(entry['offset'])
 
             scale_obj = SlideRuleScale(
-                resolved, layer=layer, rule_length=rule_length,
+                entry, layer=layer, rule_length=rule_length,
             )
 
             if rule_type == 'circular':
-                radius = offset
-                scale_obj.draw_circular(msp, radius=radius,
+                scale_obj.draw_circular(msp, radius=offset,
                                         center_x=center[0],
                                         center_y=center[1])
                 summary_lines.append(
-                    f"  {scale_obj.name:4s}  {layer:7s}  R={radius:.1f}")
+                    f"  {scale_obj.name:4s}  {layer:7s}  R={offset:.1f}")
             else:
-                y_offset = offset
-                scale_obj.draw(msp, y_offset=y_offset)
+                scale_obj.draw(msp, y_offset=offset)
                 summary_lines.append(
-                    f"  {scale_obj.name:4s}  {layer:7s}  y={y_offset:.1f}")
+                    f"  {scale_obj.name:4s}  {layer:7s}  y={offset:.1f}")
 
             drawn_count += 1
 
