@@ -11,10 +11,6 @@ from ezdxf.enums import TextEntityAlignment
 # ============================================================
 #  Transform expression compiler
 # ============================================================
-#
-#  Turns the human-readable strings in the YAML (e.g.
-#  "0.5 * log10(x)") into fast Python callables.
-# ============================================================
 
 _TRANSFORM_NAMESPACE = {
     'math':   math,
@@ -42,39 +38,59 @@ def compile_transform(expr: str):
 
 
 # ============================================================
-#  YAML → scale object builder
+#  Inheritance resolver
 # ============================================================
 
-def _resolve_scale_def(name, scales_cfg):
-    """Follow `inherits` chains and return a fully-resolved scale dict."""
-    defn = scales_cfg[name]
-    if 'inherits' not in defn:
-        return defn
-    parent = _resolve_scale_def(defn['inherits'], scales_cfg)
-    merged = dict(parent)
-    # child keys override parent, except 'inherits' itself
-    for k, v in defn.items():
+def _resolve_inherits(entry, all_scales):
+    """If `entry` has an `inherits` key, merge from the named source scale."""
+    parent_name = entry.get('inherits')
+    if parent_name is None:
+        return entry
+
+    # Find the parent scale by name across all parts
+    parent = None
+    for s in all_scales:
+        if s['name'] == parent_name:
+            parent = s
+            break
+    if parent is None:
+        raise ValueError(
+            f"Scale '{entry['name']}' inherits from '{parent_name}' "
+            f"which was not found"
+        )
+
+    # Recursively resolve if parent also inherits
+    parent = _resolve_inherits(parent, all_scales)
+
+    # Merge: parent fields as base, child overrides
+    merged = {}
+    for k, v in parent.items():
+        if k not in ('name', 'offset', 'direction', 'inverted', 'inherits'):
+            merged[k] = v
+    for k, v in entry.items():
         if k != 'inherits':
             merged[k] = v
     return merged
 
 
+# ============================================================
+#  SlideRuleScale — draws one scale
+# ============================================================
+
 class SlideRuleScale:
     """Generic slide-rule scale driven entirely by config data."""
 
-    def __init__(self, scale_name, scale_cfg, *,
-                 direction='up', inverted=False, layer=None,
-                 rule_length=250.0):
+    def __init__(self, scale_cfg, *, layer=None, rule_length=250.0):
         self.rule_length = rule_length
-        self.direction = direction
-        self.inverted = inverted
+        self.direction = scale_cfg.get('direction', 'up')
+        self.inverted = scale_cfg.get('inverted', False)
         self.layer = layer
         self.drawn_ticks = set()
 
         # --- transform ---
         self._transform_fn = compile_transform(scale_cfg['transform'])
 
-        # --- sections (convert [[step,h], …] lists → tuple pairs) ---
+        # --- sections ---
         self.sections = []
         for sec in scale_cfg['sections']:
             self.sections.append({
@@ -91,8 +107,19 @@ class SlideRuleScale:
         self.name_angle_deg   = float(name_label.get('angle_deg', 83.0))
         self.linear_offset_x  = float(name_label.get('linear_offset_x', -5.0))
 
+        # --- complement labels (e.g. cos on a sin scale) ---
+        comp = scale_cfg.get('complement', None)
+        if comp:
+            self.complement_angle = float(comp['full_angle'])
+            self.complement_label_height = float(
+                comp.get('label_height', self.label_height))
+            self.complement_text_height = float(
+                comp.get('text_height', 2.0))
+        else:
+            self.complement_angle = None
+
         # --- display name ---
-        self.name = scale_name
+        self.name = scale_cfg['name']
         if self.inverted and not self.name.endswith('I'):
             self.name += 'I'
 
@@ -111,7 +138,7 @@ class SlideRuleScale:
             a.update(extra)
         return a
 
-    # ---------- tick iteration (shared) ----------
+    # ---------- tick iteration ----------
 
     def _iter_ticks(self):
         for section in self.sections:
@@ -144,6 +171,9 @@ class SlideRuleScale:
         text_align = (TextEntityAlignment.BOTTOM_CENTER
                       if self.direction == 'up'
                       else TextEntityAlignment.TOP_CENTER)
+        comp_align = (TextEntityAlignment.TOP_CENTER
+                      if self.direction == 'up'
+                      else TextEntityAlignment.BOTTOM_CENTER)
 
         self._draw_linear_name(msp, y_offset, y_mult)
 
@@ -153,6 +183,10 @@ class SlideRuleScale:
             if height == self.label_height:
                 self._draw_linear_label(msp, pos_x, y_offset, height,
                                         y_mult, text_align, x_rounded)
+            if (self.complement_angle is not None
+                    and height >= self.complement_label_height):
+                self._draw_linear_complement(msp, pos_x, y_offset,
+                                             y_mult, comp_align, x_rounded)
             self._mark_drawn(x_rounded)
 
         self._draw_linear_baseline(msp, y_offset)
@@ -188,6 +222,22 @@ class SlideRuleScale:
             dxfattribs=self._dxfattribs(),
         )
 
+    def _draw_linear_complement(self, msp, pos_x, y_offset,
+                                y_mult, comp_align, x_rounded):
+        """Draw a complement-angle label on the opposite side of the baseline."""
+        comp_val = round(self.complement_angle - x_rounded, 5)
+        if comp_val <= 0:
+            return
+        label_text = f"{comp_val:g}"
+        msp.add_text(
+            label_text, dxfattribs=self._dxfattribs({
+                'height': self.complement_text_height,
+            })
+        ).set_placement(
+            (pos_x, y_offset - (0.5 * y_mult)),
+            align=comp_align,
+        )
+
     # ==========================================================
     #  Circular drawing
     # ==========================================================
@@ -210,9 +260,15 @@ class SlideRuleScale:
                 self._draw_circular_label(msp, radius, center_x, center_y,
                                           height, y_mult, angle_deg,
                                           angle_rad, x_rounded)
+            if (self.complement_angle is not None
+                    and height >= self.complement_label_height):
+                self._draw_circular_complement(msp, radius, center_x,
+                                               center_y, y_mult,
+                                               angle_deg, angle_rad,
+                                               x_rounded)
             self._mark_drawn(x_rounded)
 
-    # -- circular geometry helpers --
+    # -- circular helpers --
 
     @staticmethod
     def _mapped_val_to_angle(mapped_val):
@@ -244,7 +300,7 @@ class SlideRuleScale:
         msp.add_text(
             self.name,
             dxfattribs=self._dxfattribs({
-                'height': 3.0, 'rotation': text_rot, 'color': 1,
+                'height': 3.0, 'rotation': text_rot,
             }),
         ).set_placement((tx, ty), align=TextEntityAlignment.MIDDLE_CENTER)
 
@@ -270,6 +326,25 @@ class SlideRuleScale:
             dxfattribs=self._dxfattribs({'height': 2.5, 'rotation': text_rot}),
         ).set_placement((tx, ty), align=TextEntityAlignment.MIDDLE_CENTER)
 
+    def _draw_circular_complement(self, msp, radius, center_x, center_y,
+                                  y_mult, angle_deg, angle_rad, x_rounded):
+        """Draw a complement-angle label on the opposite side of the baseline."""
+        comp_val = round(self.complement_angle - x_rounded, 5)
+        if comp_val <= 0:
+            return
+        label_text = f"{comp_val:g}"
+        text_radius = radius - (1.5 * y_mult)
+        tx, ty = self._point_on_circle(center_x, center_y,
+                                       text_radius, angle_rad)
+        text_rot = angle_deg - 90 + self.label_tilt
+        msp.add_text(
+            label_text,
+            dxfattribs=self._dxfattribs({
+                'height': self.complement_text_height,
+                'rotation': text_rot,
+            }),
+        ).set_placement((tx, ty), align=TextEntityAlignment.MIDDLE_CENTER)
+
 
 # ============================================================
 #  Main: load YAML → build scales → render DXF
@@ -280,80 +355,73 @@ def load_config(path):
         return yaml.safe_load(f)
 
 
-def _compute_positions(layout, rule_type, g):
-    """Walk the layout list, accumulate gap_before values, return positions.
-
-    For circular: positions are radii, decreasing from start_radius.
-    For linear:   positions are y-offsets, decreasing from start_y.
-    """
-    if rule_type == 'circular':
-        pos = g.get('start_radius', 230.0)
-    else:
-        pos = g.get('start_y', 0.0)
-
-    positions = []
-    for i, entry in enumerate(layout):
-        gap = float(entry.get('gap_before', 0.0))
-        if i == 0:
-            pos -= gap          # first entry: offset from start
-        else:
-            pos -= gap          # subsequent entries: gap from previous
-        positions.append(pos)
-    return positions
+def _collect_all_scales(layout):
+    """Gather every scale entry from all parts into a flat list."""
+    all_scales = []
+    for part_name, entries in layout.items():
+        for entry in entries:
+            all_scales.append(entry)
+    return all_scales
 
 
 def build_and_render(cfg, output_file='output.dxf'):
     g = cfg['global']
-    rule_type   = g.get('type', None)
+    rule_type = g.get('type', None)
     if rule_type not in ('circular', 'linear'):
         raise ValueError(
             f"global.type must be 'circular' or 'linear', got {rule_type!r}"
         )
 
-    layers_cfg  = g.get('layers', {})
-    scales_cfg  = cfg['scales']
-    layout      = cfg['layout']
+    layers_cfg = g.get('layers', {})
+    layout     = cfg['layout']
 
     # Type-specific geometry
     if rule_type == 'linear':
         rule_length = g.get('rule_length_mm', 250.0)
     else:
         center = tuple(g.get('center', [0.0, 0.0]))
-        rule_length = 250.0          # not used for circular, but needed by SlideRuleScale
+        rule_length = 250.0
 
-    # Compute absolute positions from gaps
-    positions = _compute_positions(layout, rule_type, g)
+    # Collect all scales for inheritance resolution
+    all_scales = _collect_all_scales(layout)
 
     # --- DXF document ---
     doc = ezdxf.new(dxfversion='R2010')
     msp = doc.modelspace()
 
     for layer_name, layer_props in layers_cfg.items():
-        doc.layers.add(layer_name, dxfattribs={'color': layer_props.get('color', 7)})
+        doc.layers.add(layer_name,
+                       dxfattribs={'color': layer_props.get('color', 7)})
 
     # --- walk the layout ---
-    for entry, pos in zip(layout, positions):
-        scale_key = entry['scale']
-        scale_def = _resolve_scale_def(scale_key, scales_cfg)
+    drawn_count = 0
+    summary_lines = []
 
-        direction = entry.get('direction', 'up')
-        inverted  = entry.get('inverted', False)
-        layer     = entry.get('part', None)
+    for part_name, entries in layout.items():
+        layer = part_name.upper()          # stator → STATOR, slide → SLIDE
 
-        scale_obj = SlideRuleScale(
-            scale_name=scale_key,
-            scale_cfg=scale_def,
-            direction=direction,
-            inverted=inverted,
-            layer=layer,
-            rule_length=rule_length,
-        )
+        for entry in entries:
+            resolved = _resolve_inherits(entry, all_scales)
+            offset   = float(resolved['offset'])
 
-        if rule_type == 'circular':
-            scale_obj.draw_circular(msp, radius=pos,
-                                    center_x=center[0], center_y=center[1])
-        else:
-            scale_obj.draw(msp, y_offset=pos)
+            scale_obj = SlideRuleScale(
+                resolved, layer=layer, rule_length=rule_length,
+            )
+
+            if rule_type == 'circular':
+                radius = offset
+                scale_obj.draw_circular(msp, radius=radius,
+                                        center_x=center[0],
+                                        center_y=center[1])
+                summary_lines.append(
+                    f"  {scale_obj.name:4s}  {layer:7s}  R={radius:.1f}")
+            else:
+                y_offset = offset
+                scale_obj.draw(msp, y_offset=y_offset)
+                summary_lines.append(
+                    f"  {scale_obj.name:4s}  {layer:7s}  y={y_offset:.1f}")
+
+            drawn_count += 1
 
     # --- save ---
     doc.saveas(output_file)
@@ -361,16 +429,9 @@ def build_and_render(cfg, output_file='output.dxf'):
     # --- summary ---
     print(f"Generated {output_file}  ({rule_type})")
     print(f"Layers: {', '.join(layers_cfg.keys())}")
-    print(f"Scales drawn: {len(layout)}")
-    for entry, pos in zip(layout, positions):
-        tag = entry['scale']
-        if entry.get('inverted'):
-            tag += 'I'
-        part = entry.get('part', '?')
-        if rule_type == 'circular':
-            print(f"  {tag:4s}  {part:7s}  R={pos:.1f}")
-        else:
-            print(f"  {tag:4s}  {part:7s}  y={pos:.1f}")
+    print(f"Scales drawn: {drawn_count}")
+    for line in summary_lines:
+        print(line)
 
 
 if __name__ == '__main__':
