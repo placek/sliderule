@@ -2,14 +2,13 @@
 #  Slide Rule Configuration
 # ============================================================
 #
-#  This file fully describes a circular slide rule:  which
-#  scales exist, how they're placed, their tick resolution,
-#  and where labels go.
+#  This file fully describes a linear slide rule:  which scales exist, how
+#  they're placed, their tick resolution, and where labels go.
 #
 #  Conventions
 #  -----------
-#  • direction:  "up"   = ticks grow outward
-#                "down" = ticks grow inward
+#  • direction:  "up"   = ticks grow upward
+#                "down" = ticks grow downward
 #  • inverted:   true  → the scale reads right-to-left (CI, DI, …)
 #  • Tick tuples: [step, height_mm]
 #      height 8.0 = major  (gets a numeric label)
@@ -27,13 +26,10 @@
 #  Global geometry
 # ----------------------------------------------------------
 global:
-  type: circular                   # "circular" or "linear"
+  type: linear                     # "circular" or "linear"
 
-  # Circular geometry
-  center: [0.0, 0.0]              # center of the disc
-  gap_mm:  20.0                    # space between independent scale circles
-  pair_mm:  1.0                    # offset between mated-pair baselines
-                                   # (A/B, C/D share a visual edge)
+  # Linear geometry
+  rule_length_mm: 250.0            # total length of the rule
 
   # DXF layers (and their colours)
   layers:
@@ -41,24 +37,6 @@ global:
       color: 5                   # blue  — movable tongue
     STATOR:
       color: 3                   # green — fixed body
-
-
-# ----------------------------------------------------------
-#  Radii — defines the radial order outer → inner
-#  "base" is the conceptual shared radius; paired scales
-#  offset by ±pair_mm from it.
-# ----------------------------------------------------------
-radii:
-  R_K:    230.0
-  R_AB:   210.0          # shared baseline for A/B pair
-  R_CF:   190.0
-  R_CI:   170.0
-  R_CD:   150.0          # shared baseline for C/D pair
-  R_S:    130.0
-  R_ST:   110.0
-  R_T:     90.0
-  R_L:     70.0
-
 
 # ----------------------------------------------------------
 #  Scale definitions
@@ -199,7 +177,7 @@ scales:
 
 
 # ----------------------------------------------------------
-#  Layout — circular draw list
+#  Layout — linear draw list
 # ----------------------------------------------------------
 #
 #  Each entry says:
@@ -207,29 +185,28 @@ scales:
 #    part      – SLIDE or STATOR  (→ DXF layer)
 #    direction – tick growth direction
 #    inverted  – read backwards?
-#    radius    – radius in mm from center
+#    y_offset  – baseline position (linear mode)
 #
-#  Order = outer → inner.
-#  For paired scales the comments show which shared baseline
-#  they straddle.
+#  Order = top → bottom. For paired scales the comments show
+#  which shared baseline they straddle.
 # ----------------------------------------------------------
 layout:
-  - { scale: K,  part: STATOR, direction: up,   inverted: false, radius: 230.0  }
+  - { scale: K,  part: STATOR, direction: up,   inverted: false, y_offset:   0.0 }
 
-  # A/B pair (shared baseline ≈ 210)
-  - { scale: A,  part: STATOR, direction: up,   inverted: false, radius: 211.0  }
-  - { scale: B,  part: SLIDE,  direction: down, inverted: false, radius: 209.0  }
+  # A/B pair (shared baseline ≈ -20)
+  - { scale: A,  part: STATOR, direction: up,   inverted: false, y_offset: -19.0 }
+  - { scale: B,  part: SLIDE,  direction: down, inverted: false, y_offset: -21.0 }
 
   # Slide mid-section
-  - { scale: CF, part: SLIDE,  direction: up,   inverted: false, radius: 190.0  }
-  - { scale: C,  part: SLIDE,  direction: up,   inverted: true,  radius: 170.0  }   # CI
+  - { scale: CF, part: SLIDE,  direction: up,   inverted: false, y_offset: -40.0 }
+  - { scale: C,  part: SLIDE,  direction: up,   inverted: true,  y_offset: -60.0 }   # CI
 
-  # C/D pair (shared baseline ≈ 150)
-  - { scale: C,  part: SLIDE,  direction: up,   inverted: false, radius: 151.0  }
-  - { scale: D,  part: STATOR, direction: down, inverted: false, radius: 149.0  }
+  # C/D pair (shared baseline ≈ -80)
+  - { scale: C,  part: SLIDE,  direction: up,   inverted: false, y_offset: -79.0 }
+  - { scale: D,  part: STATOR, direction: down, inverted: false, y_offset: -81.0 }
 
   # Inner stator scales
-  - { scale: S,  part: STATOR, direction: down, inverted: false, radius: 130.0  }
-  - { scale: ST, part: STATOR, direction: down, inverted: false, radius: 110.0  }
-  - { scale: T,  part: STATOR, direction: down, inverted: false, radius:  90.0  }
-  - { scale: L,  part: STATOR, direction: down, inverted: false, radius:  70.0  }
+  - { scale: S,  part: STATOR, direction: down, inverted: false, y_offset: -100.0 }
+  - { scale: ST, part: STATOR, direction: down, inverted: false, y_offset: -120.0 }
+  - { scale: T,  part: STATOR, direction: down, inverted: false, y_offset: -140.0 }
+  - { scale: L,  part: STATOR, direction: down, inverted: false, y_offset: -160.0 }

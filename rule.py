@@ -282,11 +282,22 @@ def load_config(path):
 
 def build_and_render(cfg, output_file='output.dxf'):
     g = cfg['global']
-    rule_length = g.get('rule_length_mm', 250.0)
-    center      = tuple(g.get('center', [0.0, 0.0]))
+    rule_type   = g.get('type', None)
+    if rule_type not in ('circular', 'linear'):
+        raise ValueError(
+            f"global.type must be 'circular' or 'linear', got {rule_type!r}"
+        )
+
     layers_cfg  = g.get('layers', {})
     scales_cfg  = cfg['scales']
     layout      = cfg['layout']
+
+    # Type-specific geometry
+    if rule_type == 'linear':
+        rule_length = g.get('rule_length_mm', 250.0)
+    else:
+        center = tuple(g.get('center', [0.0, 0.0]))
+        rule_length = 250.0          # not used for circular, but needed by SlideRuleScale
 
     # --- DXF document ---
     doc = ezdxf.new(dxfversion='R2010')
@@ -303,8 +314,6 @@ def build_and_render(cfg, output_file='output.dxf'):
         direction = entry.get('direction', 'up')
         inverted  = entry.get('inverted', False)
         layer     = entry.get('part', None)
-        radius    = entry.get('radius', None)
-        y_offset  = entry.get('y_offset', 0.0)
 
         scale_obj = SlideRuleScale(
             scale_name=scale_key,
@@ -315,27 +324,33 @@ def build_and_render(cfg, output_file='output.dxf'):
             rule_length=rule_length,
         )
 
-        if radius is not None:
+        if rule_type == 'circular':
+            radius = entry.get('radius')
+            if radius is None:
+                raise ValueError(
+                    f"Layout entry for '{scale_key}' is missing 'radius' "
+                    f"(required for circular rules)"
+                )
             scale_obj.draw_circular(msp, radius=radius,
                                     center_x=center[0], center_y=center[1])
         else:
+            y_offset = entry.get('y_offset', 0.0)
             scale_obj.draw(msp, y_offset=y_offset)
 
     # --- save ---
     doc.saveas(output_file)
 
     # --- summary ---
-    print(f"Generated {output_file}")
+    print(f"Generated {output_file}  ({rule_type})")
     print(f"Layers: {', '.join(layers_cfg.keys())}")
     print(f"Scales drawn: {len(layout)}")
     for entry in layout:
         tag = entry['scale']
         if entry.get('inverted'):
             tag += 'I'
-        r = entry.get('radius')
         part = entry.get('part', '?')
-        if r is not None:
-            print(f"  {tag:4s}  {part:7s}  R={r}")
+        if rule_type == 'circular':
+            print(f"  {tag:4s}  {part:7s}  R={entry.get('radius')}")
         else:
             print(f"  {tag:4s}  {part:7s}  y={entry.get('y_offset', 0.0)}")
 
