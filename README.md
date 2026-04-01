@@ -1,87 +1,97 @@
 # Slide Rule DXF Generator
 
-This repo contains a single-purpose generator for slide rule layouts. The core logic lives in `rule.py`, which reads a YAML configuration and produces a DXF file containing linear or circular scales (ticks, labels, and scale names).
+Config-driven DXF renderer for slide-rule scales. The main entry point is
+`rule.py`, which reads a YAML file and writes a DXF containing linear or
+circular scales (ticks, labels, and scale names).
 
-## Purpose of `rule.py`
+## Repository contents
 
-`rule.py` is a config-driven DXF renderer for slide-rule scales. It:
+- `rule.py`: DXF generator (Python + ezdxf).
+- `simple.yaml`: small circular example config.
+- `k-a-b-c-cf-ci-c-d-s-st-t.yaml`: larger circular config.
+- `k-a-b-c-cf-ci-c-d-s-st-t-linear.yaml`: linear variant of the above.
+- `simple.dxf`: sample output from `simple.yaml`.
+- `Makefile`: convenience targets to build the larger DXFs.
 
-- Loads a YAML file describing scales, tick density, labels, and layout.
-- Compiles symbolic transform expressions (e.g., `log10(x)`) into Python callables.
-- Draws linear or circular scales into DXF layers.
-- Writes a DXF file and prints a short summary.
+## Requirements
 
-The file uses a `nix-shell` shebang to make it easy to run with the required Python dependencies.
+`rule.py` uses a `nix-shell` shebang for Python 3 + `ezdxf` + `pyyaml`.
+If you are not using Nix, install those dependencies and run with `python3`.
 
 ## Usage
 
-Basic run (uses the default config name):
+The script defaults to `sliderule.yaml`, which is not in this repo, so pass a
+config path explicitly:
 
 ```bash
-./rule.py
-```
-
-Explicit config and output file:
-
-```bash
+./rule.py simple.yaml -o simple.dxf
 ./rule.py k-a-b-c-cf-ci-c-d-s-st-t.yaml -o k-a-b-c-cf-ci-c-d-s-st-t.dxf
+./rule.py k-a-b-c-cf-ci-c-d-s-st-t-linear.yaml -o k-a-b-c-cf-ci-c-d-s-st-t-linear.dxf
 ```
 
-The script prints a summary after writing the DXF:
+Build the two larger outputs with:
 
-- output file name
-- layer names
-- scale count and per-scale placement (radius or y offset)
+```bash
+make
+```
 
-## Configuration overview
+Clean generated DXFs:
 
-The YAML file is the whole source of truth. It contains three top-level sections:
+```bash
+make clean
+```
 
-### 1) `global`
-Defines overall geometry and DXF layer properties.
+After writing the DXF, the script prints a short summary of layers and scale
+placements.
 
-Key fields:
+## Configuration format (YAML)
 
-- `rule_length_mm`: linear baseline length used when drawing linear scales.
+Top-level keys:
+
+- `global`: overall geometry and DXF layers.
+- `layout`: ordered scales grouped by part (e.g., `slide`, `stator`).
+
+### `global`
+
+- `type`: `circular` or `linear` (required).
 - `center`: `[x, y]` center point for circular layouts.
-- `layers`: DXF layers and colors (e.g., `SLIDE`, `STATOR`).
+- `rule_length_mm`: baseline length for linear layouts (defaults to 250.0).
+- `layers`: mapping of DXF layers and colors (e.g., `SLIDE`, `STATOR`).
 
-### 2) `scales`
-Defines individual scale types. Each scale entry supports:
+### `layout`
 
-- `transform`: expression mapping `x` to `[0, 1]`.
-- `sections`: list of `[start, end]` ranges with tick definitions.
-- `label_height`: tick height that gets a numeric label.
-- `label_tilt`: label rotation (degrees) for circular layouts.
-- `name_label`: scale name placement hints.
-- `inherits`: copy another scale definition and override keys.
+`layout` maps part names to lists of scale entries. Each part name is uppercased
+and used as the DXF layer, so it should exist in `global.layers`.
 
-Tick definitions are `[[step, height_mm], ...]`. The height controls tick prominence and whether labels are drawn (only ticks matching `label_height` get labels).
+Each scale entry supports:
 
-### 3) `layout`
-Defines the draw order and placement of each scale.
-
-Each entry can include:
-
-- `scale`: name of the scale definition from `scales`.
-- `part`: DXF layer name (e.g., `SLIDE`, `STATOR`).
+- `name`: scale label.
+- `offset`: radius (circular) or y-offset (linear).
 - `direction`: `up` or `down` (tick growth direction).
-- `inverted`: `true` for right-to-left scales (CI, DI, etc.).
-- `radius`: if set, draws a circular scale at this radius.
-- `y_offset`: if set and `radius` is omitted, draws a linear scale at this y.
+- `inverted`: `true` to flip the scale left-to-right.
+- `transform`: expression mapping `x` to `[0, 1]`.
+- `sections`: list of `{start, end, ticks}` ranges.
+- `label_height`: tick height that gets a numeric label.
+- `label_tilt`: label rotation for circular layouts.
+- `name_label`: `{angle_deg, linear_offset_x}` placement hints.
+- `complement`: optional complement labeling:
+  `{full_angle, label_height, text_height}`.
 
-## Consequences and gotchas
+Tick definitions are `[[step, height_mm], ...]`. Height controls tick
+prominence and whether labels are drawn (only ticks matching `label_height`
+get numeric labels).
 
-- **Transforms are `eval`-compiled.** Only trusted configs should be used. Invalid or unsafe expressions can crash or do worse.
-- **Transforms must map into `[0, 1]`.** Values outside this range are ignored, so scales can disappear if the transform is wrong.
-- **Inversion affects naming.** If `inverted: true` and the scale name does not end in `I`, an `I` is appended in the rendered label.
-- **Labeling is height-sensitive.** If `label_height` does not match any tick height, no numeric labels appear.
-- **Overwrites output.** The `-o` target file is replaced without prompting.
-- **Precision and rounding.** Tick positions are rounded to 5 decimals to avoid duplicate drawing; very fine steps can be skipped if they collide.
+### Transform expressions
 
-## File in this repo
+Transforms are compiled with `eval` and run against a small math namespace
+(`log10`, `sin`, `cos`, `tan`, `rad`, `pi`, `e`, `sqrt`, `ln`, `abs`). Use only
+trusted configs. The transform should map values into `[0, 1]`; values outside
+that range are ignored.
 
-- `k-a-b-c-cf-ci-c-d-s-st-t.yaml`: example configuration for a circular multi-scale rule.
-- `k-a-b-c-cf-ci-c-d-s-st-t.dxf`: a sample output (may be overwritten if you use it as `-o`).
+## Limitations and gotchas
 
-If you need a linear layout, set `y_offset` entries in `layout` and omit `radius` for those scales.
+- **`inherits` is not implemented.** Some configs mention `inherits`, but
+  `rule.py` does not resolve it. Duplicate the fields or use YAML anchors.
+- **Output overwrites.** The `-o` target is replaced without prompting.
+- **Precision.** Tick positions are rounded to 5 decimals to avoid duplicates;
+  very fine steps can be skipped if they collide.
